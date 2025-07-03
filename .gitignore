@@ -1,0 +1,37 @@
+# Python
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# База данных
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Файлы конфигурации
+config.py
+.env
+
+# Файлы IDE
+.idea/
+.vscode/
+
+# Project specific
+pybundler.py
+XBalanseBot.txt
+*.log
+backups/
+tests/
+
+# OS
+.DS_Store
+Thumbs.db

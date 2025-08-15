@@ -5,6 +5,7 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from datetime import datetime, time
+from app.utils import get_next_run_time
 
 def confirm_delete_keyboard(callback_data: str) -> InlineKeyboardMarkup:
     """
@@ -106,7 +107,7 @@ async def get_events_keyboard(events: list, action: str = "view") -> InlineKeybo
     Создает клавиатуру со списком событий.
 
     Args:
-        events (list): Список событий.
+        events (list): Список событий (может быть уже отсортирован).
         action (str, optional): Действие ('view', 'edit', 'delete').
 
     Returns:
@@ -118,17 +119,26 @@ async def get_events_keyboard(events: list, action: str = "view") -> InlineKeybo
     for event_row in events:
         event = dict(event_row)
         
-        schedule_str = ""
-        if event['event_type'] == 'single' and event.get('event_date'):
-            event_date = event['event_date']
-            if isinstance(event_date, str): event_date = datetime.fromisoformat(event_date)
-            schedule_str = event_date.strftime('%d.%m %H:%M')
-        elif event['event_type'] == 'recurring' and event.get('weekday') is not None and event.get('event_time'):
-            event_time = event['event_time']
-            if isinstance(event_time, str): event_time = time.fromisoformat(event_time)
-            schedule_str = f"Каждый {weekdays_map[event['weekday']]} в {event_time.strftime('%H:%M')}"
+        # ДОБАВЛЕНО: Вычисление конкретной даты для всех событий
+        next_run = get_next_run_time(
+            event['event_type'],
+            event.get('event_date'),
+            event.get('weekday'),
+            event.get('event_time'),
+            event.get('last_run')
+        )
+        
+        if next_run:
+            date_str = next_run.strftime('%d.%m')
+            weekday_str = weekdays_map[next_run.weekday()]
+            time_str = next_run.strftime('%H:%M')
+            schedule_str = f"{date_str} ({weekday_str}) {time_str}"
+        else:
+            # Fallback для событий без корректной даты
+            schedule_str = "Дата не определена"
 
         event_display_name = event.get('name') or event.get('activity_name')
+        # ДОБАВЛЕНО: Форматирование названия жирным
         text = f"{schedule_str} - {event_display_name}"
         
         event_id = event['id']

@@ -1,0 +1,15 @@
+# XBalanseBot/requirements.txt
+# pip install -r requirements.txt
+
+
+# Основные зависимости бота
+apscheduler==3.10.4
+python-dotenv==1.0.1
+
+# Зависимости, которые раньше требовал aiogram, но теперь мы управляем ими вручную
+aiofiles~=23.2.1
+magic-filter<1.1,>=1.0.12
+pydantic<2.9,>=2.4.1
+
+# Наш HTTP-клиент, не требующий компиляции
+httpx==0.27.0

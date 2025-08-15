@@ -1,10 +1,9 @@
-# app/utils.py
-
+# 2025-07-24 18:30:00
 import logging
 from datetime import datetime, timedelta, time
 from decimal import Decimal
 from aiogram import Bot
-from config import MAIN_GROUP_ID
+from config import MAIN_GROUP_ID, CURRENCY_SYMBOL # ИЗМЕНЕНО: Добавлен импорт CURRENCY_SYMBOL
 from app.database import db
 
 logger = logging.getLogger(__name__)
@@ -29,6 +28,63 @@ def format_amount(amount: Decimal) -> str:
         
     return s
 
+def format_transactions_history(transactions: list, user_db_id: int) -> str:
+    """
+    Форматирует список транзакций в текстовый отчет по категориям.
+
+    Args:
+        transactions (list): Список транзакций (объекты sqlite3.Row).
+        user_db_id (int): ID пользователя в БД, для которого строится отчет.
+
+    Returns:
+        str: Отформатированный HTML-текст истории.
+    """
+    response_parts = []
+    top_ups, incoming, outgoing, system_debits = [], [], [], []
+
+    for tx in transactions:
+        if tx['to_user_id'] == user_db_id:
+            if tx['type'] in ('manual_add', 'welcome_bonus', 'top_up'):
+                top_ups.append(tx)
+            elif tx['type'] in ('transfer', 'fund_payment'):
+                incoming.append(tx)
+        elif tx['from_user_id'] == user_db_id:
+            if tx['type'] in ('transfer', 'event_fee'):
+                outgoing.append(tx)
+            elif tx['type'] in ('demurrage', 'manual_rem'):
+                system_debits.append(tx)
+
+    def format_tx_line(tx, sign, prefix="", peer_name=""):
+        date_str = tx['created_at'].strftime('%d.%m %H:%M')
+        amount_str = format_amount(Decimal(str(tx['amount'])))
+        comment = f" ({tx['comment']})" if tx['comment'] else ""
+        return f"  {sign} {amount_str} {prefix}{peer_name}{comment} - {date_str}\n"
+
+    if top_ups:
+        response_parts.append("\n\n💰 <b>Пополнения:</b>\n")
+        for tx in top_ups:
+            response_parts.append(format_tx_line(tx, "✅ +"))
+    
+    if incoming:
+        response_parts.append("\n📥 <b>Входящие переводы:</b>\n")
+        for tx in incoming:
+            peer = f"@{tx['sender_username']}" if tx['sender_username'] else "Пользователь"
+            response_parts.append(format_tx_line(tx, "➕", prefix="от ", peer_name=peer))
+
+    if outgoing:
+        response_parts.append("\n📤 <b>Исходящие переводы и платежи:</b>\n")
+        for tx in outgoing:
+            peer = f"@{tx['recipient_username']}" if tx['recipient_username'] != 'fund' else "Фонд"
+            response_parts.append(format_tx_line(tx, "➖ -", peer_name=peer))
+
+    if system_debits:
+        response_parts.append("\n💸 <b>Системные списания:</b>\n")
+        for tx in system_debits:
+            peer = "Техническое списание" if tx['type'] == 'manual_rem' else "Демерредж"
+            response_parts.append(format_tx_line(tx, "➖ -", peer_name=peer))
+            
+    return "".join(response_parts)
+
 async def get_user_balance(telegram_id: int) -> Decimal:
     """Получает баланс пользователя."""
     user = db.get_user(telegram_id=telegram_id)
@@ -45,7 +101,12 @@ async def is_admin(telegram_id: int) -> bool:
     return bool(user['is_admin']) if user else False
 
 async def is_user_in_group(bot: Bot, telegram_id: int) -> bool:
-    """Проверяет, состоит ли пользователь в основной группе."""
+    """
+    Проверяет, состоит ли пользователь в основной группе.
+    """
+    if telegram_id == 0:
+        return True
+        
     try:
         member = await bot.get_chat_member(MAIN_GROUP_ID, telegram_id)
         return member.status in ['member', 'administrator', 'creator']
@@ -53,11 +114,16 @@ async def is_user_in_group(bot: Bot, telegram_id: int) -> bool:
         logger.warning(f"Could not check user {telegram_id} in group {MAIN_GROUP_ID}: {e}")
         return False
 
-async def ensure_user_exists(telegram_id: int, username: str | None) -> bool:
+async def ensure_user_exists(telegram_id: int, username: str | None, is_bot: bool = False) -> bool:
     """
     Проверяет существование пользователя и создает его, если он отсутствует.
     Также обновляет username, если он появился или изменился.
+    Игнорирует ботов.
     """
+    if is_bot:
+        logger.info(f"Ignored attempt to register a bot with id {telegram_id}")
+        return False
+
     user = db.get_user(telegram_id=telegram_id)
     
     if not user:
@@ -71,8 +137,6 @@ async def ensure_user_exists(telegram_id: int, username: str | None) -> bool:
 
     return False
 
-# РЕФАКТОРИНГ: Старая функция get_next_occurrence удалена.
-# Новая функция для вычисления следующего запуска на основе структурированных данных.
 def get_next_run_time(
     event_type: str, 
     event_date: datetime | None, 
@@ -82,37 +146,28 @@ def get_next_run_time(
 ) -> datetime | None:
     """
     Вычисляет следующую дату и время для события на основе его типа и расписания.
-
-    Args:
-        event_type (str): 'single' или 'recurring'.
-        event_date (datetime | None): Дата и время для разового события.
-        weekday (int | None): День недели (0=Пн) для регулярного события.
-        event_time (time | None): Время для регулярного события.
-        last_run (datetime, optional): Время последнего запуска. 
-                                       Используется для вычисления следующего запуска.
-
-    Returns:
-        datetime | None: Объект datetime следующего события или None, если запуск невозможен.
     """
     now = datetime.now()
     base_time = last_run or now
 
     if event_type == 'single':
-        # Разовое событие, которое еще не прошло
         if event_date and event_date > now:
             return event_date
         return None
 
     if event_type == 'recurring' and weekday is not None and event_time is not None:
-        # Начинаем поиск со следующего дня после последнего запуска (или с сегодня)
-        next_run_candidate = (base_time + timedelta(days=1)).date()
+        search_date = base_time.date()
         
-        # Ищем следующий подходящий день недели
-        days_ahead = weekday - next_run_candidate.weekday()
+        days_ahead = weekday - search_date.weekday()
         if days_ahead < 0:
             days_ahead += 7
         
-        next_date = next_run_candidate + timedelta(days=days_ahead)
-        return datetime.combine(next_date, event_time)
+        next_date = search_date + timedelta(days=days_ahead)
+        next_datetime = datetime.combine(next_date, event_time)
+        
+        if next_datetime < now:
+            next_datetime += timedelta(days=7)
+            
+        return next_datetime
 
     return None

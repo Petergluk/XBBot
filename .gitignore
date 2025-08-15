@@ -1,3 +1,29 @@
+# XBalanseBot/.gitignore
+# 2025-07-24 18:30:00
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.idea/
+.vscode/
+
+# Pytest
+.pytest_cache/
+.coverage
+
+# Данные и логи
+/data/
+*.log
+*.db
+*.db-journal
+
 # Python
 
 # Python
@@ -31,6 +57,7 @@ XBalanseBot.txt
 *.log
 backups/
 tests/
+temp/
 
 # OS
 .DS_Store

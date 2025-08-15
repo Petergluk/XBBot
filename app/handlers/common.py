@@ -41,7 +41,13 @@ async def process_cancel_delete(callback: CallbackQuery, state: FSMContext):
 
 @router.message(CommandStart(ignore_case=True))
 async def cmd_start(message: Message, state: FSMContext):
-    """Обработчик команды /start."""
+    """
+    Обработчик команды /start.
+    ИСПРАВЛЕНО: Логика отображения активностей унифицирована с /activity.
+    """
+    if message.from_user.is_bot:
+        return
+        
     await state.clear()
     logger.info(f"User {message.from_user.id} (@{message.from_user.username}) started bot")
     
@@ -60,7 +66,7 @@ async def cmd_start(message: Message, state: FSMContext):
         )
         return
     
-    is_new_user = await ensure_user_exists(message.from_user.id, message.from_user.username)
+    is_new_user = await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.is_bot)
     
     if is_new_user:
         bonus_amount_str = db.get_setting('welcome_bonus_amount', '0')
@@ -95,12 +101,20 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(welcome_text, parse_mode="HTML")
     logger.info(f"Sent welcome message to user {message.from_user.id}")
 
-    # ИЗМЕНЕНО: Системная активность (ID=1) исключена из первоначального предложения подписки.
-    activities = [act for act in db.get_all_activities() if act['id'] != 1]
+    # ИСПРАВЛЕНО: Логика отображения активностей скопирована из activity_handlers для консистентности.
+    all_activities = db.get_all_activities()
+    general_activity_events = db.get_events_for_activity(1)
+    activities_to_show = []
+    for act in all_activities:
+        if act['id'] == 1:
+            if general_activity_events:
+                activities_to_show.append(act)
+        else:
+            activities_to_show.append(act)
     
-    if activities:
+    if activities_to_show:
         user_subscriptions = db.get_user_subscriptions(message.from_user.id)
-        keyboard = await get_activities_keyboard(activities, user_subscriptions)
+        keyboard = await get_activities_keyboard(activities_to_show, user_subscriptions)
         await message.answer(
             "👇 Вы можете выбрать интересующие вас активности для подписки:",
             reply_markup=keyboard
@@ -113,7 +127,7 @@ async def cmd_help(message: Message):
     Обработчик команды /help.
     Показывает разную справку в зависимости от типа чата и прав пользователя.
     """
-    await ensure_user_exists(message.from_user.id, message.from_user.username)
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.is_bot)
     
     if message.chat.type in ('group', 'supergroup'):
         help_text = DEFAULT_HELP_TEXT_GROUP
@@ -133,9 +147,13 @@ async def on_user_join(event: ChatMemberUpdated, bot: Bot):
         return
     
     new_member = event.new_chat_member.user
+    if new_member.is_bot:
+        logger.info(f"A bot named {new_member.full_name} ({new_member.id}) joined the main group. Ignoring.")
+        return
+
     logger.info(f"User {new_member.full_name} ({new_member.id}) joined the main group")
     
-    is_new_user = await ensure_user_exists(new_member.id, new_member.username)
+    is_new_user = await ensure_user_exists(new_member.id, new_member.username, new_member.is_bot)
     
     if is_new_user:
         bonus_amount_str = db.get_setting('welcome_bonus_amount', '0')

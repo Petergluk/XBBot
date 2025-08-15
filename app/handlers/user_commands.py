@@ -1,5 +1,4 @@
-# app/handlers/user_commands.py
-
+# 2025-07-24 18:30:00
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -11,18 +10,17 @@ from aiogram.types import Message
 
 from app.database import db
 from app.states import TransferStates
-from app.utils import format_amount, get_user_balance, get_transaction_count, is_user_in_group, ensure_user_exists
+# ИЗМЕНЕНО: Добавлен импорт новой функции format_transactions_history
+from app.utils import format_amount, get_user_balance, get_transaction_count, is_user_in_group, ensure_user_exists, format_transactions_history
 from config import CURRENCY_SYMBOL
 
-# ИСПРАВЛЕНО: Добавлено отсутствующее объявление экземпляра Router.
-# Это необходимо для регистрации обработчиков в данном модуле.
 router = Router()
 logger = logging.getLogger(__name__)
 
 @router.message(Command("balance", "баланс", ignore_case=True))
 async def cmd_balance(message: Message):
     """Обработчик команды /balance."""
-    await ensure_user_exists(message.from_user.id, message.from_user.username)
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.is_bot)
     balance = await get_user_balance(message.from_user.id)
     tx_count = await get_transaction_count(message.from_user.id)
     await message.answer(
@@ -35,7 +33,7 @@ async def cmd_balance(message: Message):
 async def cmd_send(message: Message, state: FSMContext, bot: Bot):
     """Обработчик команды /send с диалогом для комментария."""
     logger.info(f"User {message.from_user.id} initiated /send command: {message.text}")
-    await ensure_user_exists(message.from_user.id, message.from_user.username)
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.is_bot)
     args = message.text.split()
     
     if len(args) < 3:
@@ -58,7 +56,11 @@ async def cmd_send(message: Message, state: FSMContext, bot: Bot):
         await message.reply(f"❌ Неверная сумма. Пожалуйста, укажите положительное число.")
         return
 
-    recipient = db.get_user(username=recipient_username)
+    if recipient_username == 'fund':
+        recipient = db.get_user(telegram_id=0)
+    else:
+        recipient = db.get_user(username=recipient_username)
+
     if not recipient:
         logger.warning(f"Recipient @{recipient_username} not found in database")
         await message.reply(
@@ -84,7 +86,7 @@ async def cmd_send(message: Message, state: FSMContext, bot: Bot):
         )
         await message.answer(
             f"💬 Вы переводите <b>{format_amount(amount)} {CURRENCY_SYMBOL}</b> пользователю @{recipient_username}.\n"
-            "Напишите комментарий к переводу:",
+            "Напишите комментарий к переводу (например, за что переводятся средства, дата договоренности и т.д.):",
             parse_mode="HTML"
         )
     else:
@@ -150,23 +152,26 @@ async def process_transfer(message: Message, recipient_id: int, recipient_telegr
         f"<b>Комментарий:</b> {comment}",
         parse_mode="HTML"
     )
-
-    try:
-        await bot.send_message(
-            recipient_telegram_id,
-            f"💸 Вам поступил перевод!\n\n"
-            f"<b>Отправитель:</b> @{sender_username}\n"
-            f"<b>Сумма:</b> {format_amount(amount)} {CURRENCY_SYMBOL}\n"
-            f"<b>Комментарий:</b> {comment}",
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.warning(f"Could not send notification to recipient {recipient_telegram_id}: {e}")
+    
+    if recipient_telegram_id != 0:
+        try:
+            await bot.send_message(
+                recipient_telegram_id,
+                f"💸 Вам поступил перевод!\n\n"
+                f"<b>Отправитель:</b> @{sender_username}\n"
+                f"<b>Сумма:</b> {format_amount(amount)} {CURRENCY_SYMBOL}\n"
+                f"<b>Комментарий:</b> {comment}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Could not send notification to recipient {recipient_telegram_id}: {e}")
 
 @router.message(Command("history", ignore_case=True))
 async def cmd_history(message: Message):
-    """Обработчик команды /history."""
-    await ensure_user_exists(message.from_user.id, message.from_user.username)
+    """
+    Обработчик команды /history.
+    """
+    await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.is_bot)
     
     args = message.text.split()
     try:
@@ -185,66 +190,29 @@ async def cmd_history(message: Message):
         user_db_id = user_db_id_row['id']
         date_limit = datetime.now() - timedelta(days=days)
         
-        incoming_txs = conn.execute("""
+        all_txs = conn.execute("""
             SELECT t.*, 
                    sender.username as sender_username,
-                   sender.id as sender_id
-            FROM transactions t
-            LEFT JOIN users sender ON t.from_user_id = sender.id
-            WHERE t.to_user_id = ? AND t.created_at > ?
-            ORDER BY t.created_at DESC
-            LIMIT 10
-        """, (user_db_id, date_limit)).fetchall()
-        
-        outgoing_txs = conn.execute("""
-            SELECT t.*, 
                    recipient.username as recipient_username
             FROM transactions t
+            LEFT JOIN users sender ON t.from_user_id = sender.id
             LEFT JOIN users recipient ON t.to_user_id = recipient.id
-            WHERE t.from_user_id = ? AND t.created_at > ?
+            WHERE (t.to_user_id = ? OR t.from_user_id = ?) AND t.created_at > ?
             ORDER BY t.created_at DESC
-            LIMIT 10
-        """, (user_db_id, date_limit)).fetchall()
+        """, (user_db_id, user_db_id, date_limit)).fetchall()
 
-    if not incoming_txs and not outgoing_txs:
+    if not all_txs:
         await message.answer(f"За последние {days} дней транзакций не найдено.")
         return
 
-    response = f"📊 <b>История транзакций за последние {days} дней:</b>\n\n"
+    # ИЗМЕНЕНО: Логика форматирования вынесена в утилиту.
+    response_parts = [f"📊 <b>История транзакций за последние {days} дней:</b>"]
+    history_text = format_transactions_history(all_txs, user_db_id)
+    response_parts.append(history_text)
+    response_parts.append(f"\n💰 <b>Текущий баланс:</b> {format_amount(current_balance)} {CURRENCY_SYMBOL}")
     
-    if incoming_txs:
-        response += "📥 <b>Поступления:</b>\n"
-        for tx in incoming_txs:
-            date_str = tx['created_at'].strftime('%d.%m.%Y')
-            amount = Decimal(str(tx['amount']))
-            comment = f" ({tx['comment']})" if tx['comment'] else ""
-            
-            sender_name = "Система"
-            if tx['sender_id'] is not None:
-                if tx['sender_id'] == 0:
-                    if tx['type'] == 'fund_payment':
-                        sender_name = "@community_fund"
-                    else:
-                        sender_name = "Система"
-                else:
-                    sender_name = f"@{tx['sender_username']}"
-            elif tx['type'] == 'manual_add':
-                sender_name = "Администрация"
+    await message.answer("".join(response_parts), parse_mode="HTML")
 
-            response += f"✅ <b>+{format_amount(amount)}</b> {CURRENCY_SYMBOL} от {sender_name}{comment} - {date_str}\n"
-        response += "\n"
-    
-    if outgoing_txs:
-        response += "📤 <b>Списания:</b>\n"
-        for tx in outgoing_txs:
-            date_str = tx['created_at'].strftime('%d.%m.%Y')
-            amount = Decimal(str(tx['amount']))
-            comment = f" ({tx['comment']})" if tx['comment'] else ""
-            recipient_name = f"@{tx['recipient_username']}" if tx['recipient_username'] else "Система"
-            response += f"➖ <b>-{format_amount(amount)}</b> {CURRENCY_SYMBOL} для {recipient_name}{comment} - {date_str}\n"
-
-    response += f"\n💰 <b>Текущий баланс:</b> {format_amount(current_balance)} {CURRENCY_SYMBOL}"
-    await message.answer(response, parse_mode="HTML")
 
 @router.message(Command("gdp", "ввп", ignore_case=True))
 async def cmd_gdp(message: Message):

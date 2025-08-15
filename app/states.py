@@ -1,5 +1,3 @@
-# app/states.py
-
 """
 Модуль для определения состояний (FSM) бота.
 Состояния используются для пошагового сбора информации от пользователя.
@@ -16,8 +14,11 @@ class AdminEditStates(StatesGroup):
     waiting_for_welcome_text = State()
     waiting_for_welcome_text_group = State()
     waiting_for_demurrage_rate = State()
+    # ИЗМЕНЕНО: Добавлено состояние для интервала демерреджа
+    waiting_for_demurrage_interval = State()
     waiting_for_exchange_rate = State()
     waiting_for_welcome_bonus = State()
+    waiting_for_reminder_text = State()
 
 class FundPaymentStates(StatesGroup):
     """Состояния для процесса выплаты из фонда."""
@@ -38,7 +39,6 @@ class ActivityEditStates(StatesGroup):
 class EventCreationStates(StatesGroup):
     """Состояния для процесса создания нового события."""
     waiting_for_activity = State()
-    # ИЗМЕНЕНО: Добавлены состояния для имени и описания
     waiting_for_event_name = State()
     waiting_for_event_description = State()
     waiting_for_type = State()
@@ -52,7 +52,6 @@ class EventCreationStates(StatesGroup):
 
 class EventEditStates(StatesGroup):
     """Состояния для процесса редактирования существующего события."""
-    # ИЗМЕНЕНО: Добавлены новые состояния для редактирования полей
     waiting_for_field_choice = State()
     waiting_for_new_name = State()
     waiting_for_new_description = State()

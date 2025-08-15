@@ -22,18 +22,15 @@ async def cmd_activity(message: Message):
     """Выводит список активностей с возможностью подписки/отписки."""
     user_id = message.from_user.id
     
-    # ИЗМЕНЕНО: Логика отображения общей активности: показывается, только если есть события.
     all_activities = db.get_all_activities()
     general_activity_events = db.get_events_for_activity(1)
     
     activities_to_show = []
     for act in all_activities:
         if act['id'] == 1:
-            # Показываем общую активность, только если у нее есть события
             if general_activity_events:
                 activities_to_show.append(act)
         else:
-            # Всегда показываем остальные активности
             activities_to_show.append(act)
 
     if not activities_to_show:
@@ -43,7 +40,14 @@ async def cmd_activity(message: Message):
     user_subscriptions = db.get_user_subscriptions(user_id)
     
     keyboard = await get_activities_keyboard(activities_to_show, user_subscriptions)
-    await message.answer("Выберите активность для просмотра информации:", reply_markup=keyboard)
+    
+    # ИЗМЕНЕНО: Добавлен поясняющий текст.
+    explanation_text = (
+        "«Активность» — это направление деятельности или «кружок по интересам», "
+        "который является контейнером для событий. Подпишитесь, чтобы участвовать.\n\n"
+        "Выберите активность для просмотра информации:"
+    )
+    await message.answer(explanation_text, reply_markup=keyboard)
 
 @router.callback_query(F.data.startswith("activity_"))
 async def process_activity_selection(callback: CallbackQuery):
@@ -176,7 +180,6 @@ async def back_to_activities_list(callback: CallbackQuery):
     """Возвращает к списку активностей."""
     user_id = callback.from_user.id
     
-    # ИЗМЕНЕНО: Логика возврата к списку идентична /activity: общая активность видна, только если есть события.
     all_activities = db.get_all_activities()
     general_activity_events = db.get_events_for_activity(1)
     activities_to_show = []
@@ -195,7 +198,12 @@ async def back_to_activities_list(callback: CallbackQuery):
     user_subscriptions = db.get_user_subscriptions(user_id)
     
     keyboard = await get_activities_keyboard(activities_to_show, user_subscriptions)
-    await callback.message.edit_text("Выберите активность для просмотра информации:", reply_markup=keyboard)
+    explanation_text = (
+        "«Активность» — это направление деятельности или «кружок по интересам», "
+        "который является контейнером для событий. Подпишитесь, чтобы участвовать.\n\n"
+        "Выберите активность для просмотра информации:"
+    )
+    await callback.message.edit_text(explanation_text, reply_markup=keyboard)
     await callback.answer()
 
 # --- Admin commands for activities ---
@@ -259,7 +267,6 @@ async def cmd_edit_activity(message: Message):
         await message.reply("❌ У вас нет прав для выполнения этой команды.")
         return
     
-    # ИЗМЕНЕНО: Системная активность (ID=1) теперь видна для редактирования.
     activities = db.get_all_activities()
     if not activities:
         await message.answer("Нет активностей для редактирования.")
@@ -374,7 +381,6 @@ async def cmd_delete_activity(message: Message):
     if not await is_admin(message.from_user.id):
         await message.reply("❌ У вас нет прав для выполнения этой команды.")
         return
-    # ИЗМЕНЕНО: Фильтрация системной активности (ID=1) сохранена.
     activities = [act for act in db.get_all_activities() if act['id'] != 1]
     if not activities:
         await message.answer("Нет активностей для удаления.")
@@ -387,7 +393,6 @@ async def cmd_delete_activity(message: Message):
 async def process_delete_confirmation(callback: CallbackQuery):
     """Запрашивает подтверждение удаления."""
     activity_id = int(callback.data.split("_")[2])
-    # ИЗМЕНЕНО: Проверка на удаление системной активности сохранена.
     if activity_id == 1:
         await callback.answer("Эту активность нельзя удалить.", show_alert=True)
         return

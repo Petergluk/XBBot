@@ -1,3 +1,5 @@
+# XBalanseBot/app/handlers/common.py
+# v1.5.4 - 2025-08-16
 import logging
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, CommandStart, ChatMemberUpdatedFilter, JOIN_TRANSITION, StateFilter
@@ -43,7 +45,6 @@ async def process_cancel_delete(callback: CallbackQuery, state: FSMContext):
 async def cmd_start(message: Message, state: FSMContext):
     """
     Обработчик команды /start.
-    ИСПРАВЛЕНО: Логика отображения активностей унифицирована с /activity.
     """
     if message.from_user.is_bot:
         return
@@ -52,10 +53,10 @@ async def cmd_start(message: Message, state: FSMContext):
     logger.info(f"User {message.from_user.id} (@{message.from_user.username}) started bot")
     
     if not await is_user_in_group(message.bot, message.from_user.id):
-        admins = db.get_all_admins()
+        admins = await db.get_all_admins()
         admin_contact = "администратору"
         if admins:
-            first_admin = db.get_user(telegram_id=admins[0]['telegram_id'])
+            first_admin = await db.get_user(telegram_id=admins[0]['telegram_id'])
             if first_admin and first_admin['username']:
                 admin_contact = f"@{first_admin['username']}"
         
@@ -69,27 +70,29 @@ async def cmd_start(message: Message, state: FSMContext):
     is_new_user = await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.is_bot)
     
     if is_new_user:
-        bonus_amount_str = db.get_setting('welcome_bonus_amount', '0')
+        bonus_amount_str = await db.get_setting('welcome_bonus_amount', '0')
         try:
             welcome_bonus = Decimal(bonus_amount_str)
             logger.info(f"Calculated welcome_bonus for user {message.from_user.id}: {welcome_bonus} from string '{bonus_amount_str}'")
 
             if welcome_bonus > 0:
-                with db.get_connection() as conn:
-                    user = conn.execute("SELECT id FROM users WHERE telegram_id = ?", (message.from_user.id,)).fetchone()
-                    if user:
-                        conn.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (str(welcome_bonus), user['id']))
-                        conn.execute(
-                            "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (0, ?, ?, 'welcome_bonus', ?)",
-                            (user['id'], str(welcome_bonus), "Welcome-бонус для нового участника")
+                async with db.pool.connection() as conn:
+                    # ИСПРАВЛЕНО: Правильный паттерн
+                    result_cursor = await conn.execute("SELECT id FROM users WHERE telegram_id = %s", (message.from_user.id,))
+                    user_row = await result_cursor.fetchone()
+                    if user_row:
+                        user_id = user_row[0]
+                        await conn.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (welcome_bonus, user_id))
+                        await conn.execute(
+                            "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (0, %s, %s, 'welcome_bonus', %s)",
+                            (user_id, welcome_bonus, "Welcome-бонус для нового участника")
                         )
-                        conn.commit()
                         logger.info(f"Welcome bonus {welcome_bonus} credited to user {message.from_user.id}")
         except (ValueError, TypeError, InvalidOperation) as e:
             logger.error(f"Could not parse welcome_bonus_amount '{bonus_amount_str}': {e}")
             welcome_bonus = Decimal('0')
 
-    welcome_text = db.get_setting('welcome_message_bot', DEFAULT_WELCOME_MESSAGE_BOT)
+    welcome_text = await db.get_setting('welcome_message_bot', DEFAULT_WELCOME_MESSAGE_BOT)
     
     welcome_text = welcome_text.replace('{username}', message.from_user.mention_html())
     bot_info = await message.bot.get_me()
@@ -101,9 +104,8 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(welcome_text, parse_mode="HTML")
     logger.info(f"Sent welcome message to user {message.from_user.id}")
 
-    # ИСПРАВЛЕНО: Логика отображения активностей скопирована из activity_handlers для консистентности.
-    all_activities = db.get_all_activities()
-    general_activity_events = db.get_events_for_activity(1)
+    all_activities = await db.get_all_activities()
+    general_activity_events = await db.get_events_for_activity(1)
     activities_to_show = []
     for act in all_activities:
         if act['id'] == 1:
@@ -113,7 +115,7 @@ async def cmd_start(message: Message, state: FSMContext):
             activities_to_show.append(act)
     
     if activities_to_show:
-        user_subscriptions = db.get_user_subscriptions(message.from_user.id)
+        user_subscriptions = await db.get_user_subscriptions(message.from_user.id)
         keyboard = await get_activities_keyboard(activities_to_show, user_subscriptions)
         await message.answer(
             "👇 Вы можете выбрать интересующие вас активности для подписки:",
@@ -156,27 +158,29 @@ async def on_user_join(event: ChatMemberUpdated, bot: Bot):
     is_new_user = await ensure_user_exists(new_member.id, new_member.username, new_member.is_bot)
     
     if is_new_user:
-        bonus_amount_str = db.get_setting('welcome_bonus_amount', '0')
+        bonus_amount_str = await db.get_setting('welcome_bonus_amount', '0')
         try:
             welcome_bonus = Decimal(bonus_amount_str)
             logger.info(f"Calculated welcome_bonus for new member {new_member.id}: {welcome_bonus} from string '{bonus_amount_str}'")
 
             if welcome_bonus > 0:
-                with db.get_connection() as conn:
-                    user = conn.execute("SELECT id FROM users WHERE telegram_id = ?", (new_member.id,)).fetchone()
-                    if user:
-                        conn.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (str(welcome_bonus), user['id']))
-                        conn.execute(
-                            "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (0, ?, ?, 'welcome_bonus', ?)",
-                            (user['id'], str(welcome_bonus), "Welcome-бонус за вступление в группу")
+                async with db.pool.connection() as conn:
+                    # ИСПРАВЛЕНО: Правильный паттерн
+                    result_cursor = await conn.execute("SELECT id FROM users WHERE telegram_id = %s", (new_member.id,))
+                    user_row = await result_cursor.fetchone()
+                    if user_row:
+                        user_id = user_row[0]
+                        await conn.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (welcome_bonus, user_id))
+                        await conn.execute(
+                            "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (0, %s, %s, 'welcome_bonus', %s)",
+                            (user_id, welcome_bonus, "Welcome-бонус за вступление в группу")
                         )
-                        conn.commit()
                         logger.info(f"Welcome bonus {welcome_bonus} credited to new member {new_member.id}")
         except (ValueError, TypeError, InvalidOperation) as e:
             logger.error(f"Could not parse welcome_bonus_amount for new member '{bonus_amount_str}': {e}")
             welcome_bonus = Decimal('0')
 
-    welcome_text = db.get_setting('welcome_message_group', DEFAULT_WELCOME_MESSAGE_GROUP)
+    welcome_text = await db.get_setting('welcome_message_group', DEFAULT_WELCOME_MESSAGE_GROUP)
     
     try:
         bot_info = await bot.get_me()

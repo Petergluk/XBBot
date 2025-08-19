@@ -1,4 +1,5 @@
-# 2025-07-24 18:30:00
+# XBalanseBot/app/handlers/user_commands.py
+# v1.5.4 - 2025-08-16
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -7,10 +8,10 @@ from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
+from psycopg.rows import dict_row
 
 from app.database import db
 from app.states import TransferStates
-# ИЗМЕНЕНО: Добавлен импорт новой функции format_transactions_history
 from app.utils import format_amount, get_user_balance, get_transaction_count, is_user_in_group, ensure_user_exists, format_transactions_history
 from config import CURRENCY_SYMBOL
 
@@ -51,15 +52,15 @@ async def cmd_send(message: Message, state: FSMContext, bot: Bot):
         amount = Decimal(args[2])
         if amount <= 0:
             raise ValueError("Сумма должна быть положительной.")
-    except (InvalidOperation, ValueError) as e:
+    except (InvalidOperation, ValueError):
         logger.error(f"Invalid amount in /send from user {message.from_user.id}: {args[2]}")
         await message.reply(f"❌ Неверная сумма. Пожалуйста, укажите положительное число.")
         return
 
     if recipient_username == 'fund':
-        recipient = db.get_user(telegram_id=0)
+        recipient = await db.get_user(telegram_id=0)
     else:
-        recipient = db.get_user(username=recipient_username)
+        recipient = await db.get_user(username=recipient_username)
 
     if not recipient:
         logger.warning(f"Recipient @{recipient_username} not found in database")
@@ -69,7 +70,7 @@ async def cmd_send(message: Message, state: FSMContext, bot: Bot):
         )
         return
     
-    if not await is_user_in_group(bot, recipient['telegram_id']):
+    if recipient['telegram_id'] != 0 and not await is_user_in_group(bot, recipient['telegram_id']):
         logger.warning(f"Recipient {recipient['telegram_id']} not in main group")
         await message.reply(f"❌ Пользователь @{recipient_username} не является участником основной группы.")
         return
@@ -117,33 +118,31 @@ async def process_transfer(message: Message, recipient_id: int, recipient_telegr
         await message.answer(f"❌ Недостаточно средств. Ваш баланс: <b>{format_amount(sender_balance)} {CURRENCY_SYMBOL}</b>", parse_mode="HTML")
         return
 
-    with db.get_connection() as conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("BEGIN TRANSACTION")
-            
-            sender_db_id = cursor.execute("SELECT id FROM users WHERE telegram_id = ?", (sender_id,)).fetchone()['id']
-            
-            cursor.execute("UPDATE users SET balance = balance - ? WHERE id = ?", (str(amount), sender_db_id))
-            cursor.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (str(amount), recipient_id))
-            
-            cursor.execute(
-                "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (?, ?, ?, 'transfer', ?)",
-                (sender_db_id, recipient_id, str(amount), comment)
-            )
-            
-            cursor.execute("UPDATE users SET transaction_count = transaction_count + 1 WHERE id IN (?, ?)", (sender_db_id, recipient_id))
-            
-            conn.commit()
-            logger.info(f"Transfer successful: {sender_id} -> {recipient_telegram_id}, amount: {amount}")
+    try:
+        async with db.pool.connection() as conn:
+            async with conn.transaction():
+                # ИСПРАВЛЕНО: Правильный паттерн для conn.execute().fetchone()
+                result_cursor = await conn.execute("SELECT id FROM users WHERE telegram_id = %s", (sender_id,))
+                sender_db_id_row = await result_cursor.fetchone()
+                sender_db_id = sender_db_id_row[0]
+                
+                await conn.execute("UPDATE users SET balance = balance - %s WHERE id = %s", (amount, sender_db_id))
+                await conn.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (amount, recipient_id))
+                
+                await conn.execute(
+                    "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (%s, %s, %s, 'transfer', %s)",
+                    (sender_db_id, recipient_id, amount, comment)
+                )
+                
+                await conn.execute("UPDATE users SET transaction_count = transaction_count + 1 WHERE id IN (%s, %s)", (sender_db_id, recipient_id))
+        
+        logger.info(f"Transfer successful: {sender_id} -> {recipient_telegram_id}, amount: {amount}")
+        await db.handle_debt_repayment(recipient_id)
 
-            db.handle_debt_repayment(recipient_id)
-
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Transaction failed between users {sender_id} -> {recipient_telegram_id}: {e}", exc_info=True)
-            await message.answer("❌ Произошла ошибка при выполнении перевода. Попробуйте позже.")
-            return
+    except Exception as e:
+        logger.error(f"Transaction failed between users {sender_id} -> {recipient_telegram_id}: {e}", exc_info=True)
+        await message.answer("❌ Произошла ошибка при выполнении перевода. Попробуйте позже.")
+        return
 
     await message.answer(
         f"✅ Перевод выполнен!\n\n"
@@ -168,9 +167,7 @@ async def process_transfer(message: Message, recipient_id: int, recipient_telegr
 
 @router.message(Command("history", ignore_case=True))
 async def cmd_history(message: Message):
-    """
-    Обработчик команды /history.
-    """
+    """Обработчик команды /history."""
     await ensure_user_exists(message.from_user.id, message.from_user.username, message.from_user.is_bot)
     
     args = message.text.split()
@@ -182,30 +179,34 @@ async def cmd_history(message: Message):
     user_id = message.from_user.id
     current_balance = await get_user_balance(user_id)
     
-    with db.get_connection() as conn:
-        user_db_id_row = conn.execute("SELECT id FROM users WHERE telegram_id = ?", (user_id,)).fetchone()
-        if not user_db_id_row:
-            await message.answer("Не удалось найти ваш профиль в системе.")
-            return
-        user_db_id = user_db_id_row['id']
-        date_limit = datetime.now() - timedelta(days=days)
-        
-        all_txs = conn.execute("""
-            SELECT t.*, 
-                   sender.username as sender_username,
-                   recipient.username as recipient_username
-            FROM transactions t
-            LEFT JOIN users sender ON t.from_user_id = sender.id
-            LEFT JOIN users recipient ON t.to_user_id = recipient.id
-            WHERE (t.to_user_id = ? OR t.from_user_id = ?) AND t.created_at > ?
-            ORDER BY t.created_at DESC
-        """, (user_db_id, user_db_id, date_limit)).fetchall()
+    async with db.pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            # ИСПРАВЛЕНО: Правильный паттерн для cur.execute().fetchone()
+            await cur.execute("SELECT id FROM users WHERE telegram_id = %s", (user_id,))
+            user_db_id_row = await cur.fetchone()
+            
+            if not user_db_id_row:
+                await message.answer("Не удалось найти ваш профиль в системе.")
+                return
+            user_db_id = user_db_id_row['id']
+            date_limit = datetime.now() - timedelta(days=days)
+            
+            await cur.execute("""
+                SELECT t.*, 
+                       sender.username as sender_username,
+                       recipient.username as recipient_username
+                FROM transactions t
+                LEFT JOIN users sender ON t.from_user_id = sender.id
+                LEFT JOIN users recipient ON t.to_user_id = recipient.id
+                WHERE (t.to_user_id = %s OR t.from_user_id = %s) AND t.created_at > %s
+                ORDER BY t.created_at DESC
+            """, (user_db_id, user_db_id, date_limit))
+            all_txs = await cur.fetchall()
 
     if not all_txs:
         await message.answer(f"За последние {days} дней транзакций не найдено.")
         return
 
-    # ИЗМЕНЕНО: Логика форматирования вынесена в утилиту.
     response_parts = [f"📊 <b>История транзакций за последние {days} дней:</b>"]
     history_text = format_transactions_history(all_txs, user_db_id)
     response_parts.append(history_text)
@@ -217,34 +218,41 @@ async def cmd_history(message: Message):
 @router.message(Command("gdp", "ввп", ignore_case=True))
 async def cmd_gdp(message: Message):
     """Обработчик команды /gdp."""
-    with db.get_connection() as conn:
-        now = datetime.now()
-        
-        def get_turnover_and_count(days=None):
-            query = "SELECT COALESCE(SUM(amount), 0) as turnover, COUNT(id) as tx_count FROM transactions WHERE type = 'transfer'"
-            params = []
-            if days:
-                query += " AND created_at > ?"
-                params.append(now - timedelta(days=days))
-            return conn.execute(query, params).fetchone()
-        
-        turnover_7d_data = get_turnover_and_count(7)
-        turnover_30d_data = get_turnover_and_count(30)
-        turnover_all_data = get_turnover_and_count()
-        
-        total_supply = Decimal(str(conn.execute("SELECT COALESCE(SUM(balance), 0) as total FROM users").fetchone()['total']))
-        fund_balance = Decimal(str(conn.execute("SELECT balance FROM users WHERE id = 0").fetchone()['balance']))
-        
-        response = f"""
+    async with db.pool.connection() as conn:
+        async with conn.cursor(row_factory=dict_row) as cur:
+            now = datetime.now()
+            
+            async def get_turnover_and_count(days=None):
+                query = "SELECT COALESCE(SUM(amount), 0) as turnover, COUNT(id) as tx_count FROM transactions WHERE type = 'transfer'"
+                params = []
+                if days:
+                    query += " AND created_at > %s"
+                    params.append(now - timedelta(days=days))
+                await cur.execute(query, params)
+                return await cur.fetchone()
+            
+            turnover_7d_data = await get_turnover_and_count(7)
+            turnover_30d_data = await get_turnover_and_count(30)
+            turnover_all_data = await get_turnover_and_count()
+            
+            await cur.execute("SELECT COALESCE(SUM(balance), 0) as total FROM users")
+            total_supply_data = await cur.fetchone()
+            total_supply = total_supply_data['total']
+            
+            await cur.execute("SELECT balance FROM users WHERE id = 0")
+            fund_balance_data = await cur.fetchone()
+            fund_balance = fund_balance_data['balance']
+            
+            response = f"""
 📊 <b>Экономика сообщества:</b>
 
 💱 <b>Оборот (переводы между пользователями):</b>
-• За 7 дней: {format_amount(Decimal(str(turnover_7d_data['turnover'])))} {CURRENCY_SYMBOL} ({turnover_7d_data['tx_count']} транзакций)
-• За 30 дней: {format_amount(Decimal(str(turnover_30d_data['turnover'])))} {CURRENCY_SYMBOL} ({turnover_30d_data['tx_count']} транзакций)
-• За все время: {format_amount(Decimal(str(turnover_all_data['turnover'])))} {CURRENCY_SYMBOL} ({turnover_all_data['tx_count']} транзакций)
+• За 7 дней: {format_amount(turnover_7d_data['turnover'])} {CURRENCY_SYMBOL} ({turnover_7d_data['tx_count']} транзакций)
+• За 30 дней: {format_amount(turnover_30d_data['turnover'])} {CURRENCY_SYMBOL} ({turnover_30d_data['tx_count']} транзакций)
+• За все время: {format_amount(turnover_all_data['turnover'])} {CURRENCY_SYMBOL} ({turnover_all_data['tx_count']} транзакций)
 
 💰 <b>Денежная масса:</b>
 • Всего в системе: {format_amount(total_supply)} {CURRENCY_SYMBOL}
 • В фонде сообщества: {format_amount(fund_balance)} {CURRENCY_SYMBOL}
 """
-        await message.answer(response, parse_mode="HTML")
+            await message.answer(response, parse_mode="HTML")

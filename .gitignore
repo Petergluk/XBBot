@@ -52,12 +52,11 @@ config.py
 .vscode/
 
 # Project specific
-pybundler.py
-XBalanseBot.txt
 *.log
 backups/
 tests/
 temp/
+update/
 
 # OS
 .DS_Store

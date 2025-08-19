@@ -1,0 +1,28 @@
+# XBalanseBot/pyproject.toml
+# v1.6.0 - 2025-08-17
+[tool.poetry]
+name = "xbalansebot"
+version = "1.6.0"
+description = "Telegram bot for community economy management"
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [{ include = "app" }]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+aiogram = "^3.8.0"
+apscheduler = "^3.10.4"
+python-dotenv = "^1.0.1"
+aiohttp = "^3.9.5"
+psycopg = {extras = ["binary", "pool"], version = "^3.1.18"}
+pydantic = "<2.9,>=2.4.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.2.2"
+pytest-asyncio = "^0.23.7"
+pytest-dotenv = "^0.5.2"
+freezegun = "^1.5.1" # ИЗМЕНЕНИЕ: Заменили pytest-freezegun на freezegun
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

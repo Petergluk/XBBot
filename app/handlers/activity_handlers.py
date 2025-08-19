@@ -1,7 +1,8 @@
+# XBalanseBot/app/handlers/activity_handlers.py
+# XBalanseBot/app/handlers/activity_handlers.py
+# v1.5.6 - 2025-08-16
 import logging
-import sqlite3
-from datetime import datetime, time
-from decimal import Decimal
+from datetime import datetime
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -22,26 +23,18 @@ async def cmd_activity(message: Message):
     """Выводит список активностей с возможностью подписки/отписки."""
     user_id = message.from_user.id
     
-    all_activities = db.get_all_activities()
-    general_activity_events = db.get_events_for_activity(1)
-    
-    activities_to_show = []
-    for act in all_activities:
-        if act['id'] == 1:
-            if general_activity_events:
-                activities_to_show.append(act)
-        else:
-            activities_to_show.append(act)
+    # ИСПРАВЛЕНО: Упрощена логика. Теперь показываются все активные активности, включая "Общие события",
+    # даже если у них пока нет запланированных событий.
+    activities_to_show = await db.get_all_activities()
 
     if not activities_to_show:
         await message.answer("На данный момент нет ни одной доступной активности.")
         return
         
-    user_subscriptions = db.get_user_subscriptions(user_id)
+    user_subscriptions = await db.get_user_subscriptions(user_id)
     
     keyboard = await get_activities_keyboard(activities_to_show, user_subscriptions)
     
-    # ИЗМЕНЕНО: Добавлен поясняющий текст.
     explanation_text = (
         "«Активность» — это направление деятельности или «кружок по интересам», "
         "который является контейнером для событий. Подпишитесь, чтобы участвовать.\n\n"
@@ -55,32 +48,28 @@ async def process_activity_selection(callback: CallbackQuery):
     activity_id = int(callback.data.split("_")[1])
     user_id = callback.from_user.id
     
-    activity = db.get_activity(activity_id)
+    activity = await db.get_activity(activity_id)
     if not activity:
         await callback.answer("Активность не найдена.", show_alert=True)
         return
 
-    is_subscribed = db.is_user_subscribed(user_id, activity_id)
+    is_subscribed = await db.is_user_subscribed(user_id, activity_id)
     keyboard = await get_activity_details_keyboard(activity_id, is_subscribed)
     
     text = f"<b>{activity['name']}</b>\n\n{activity['description']}"
     
-    events = db.get_events_for_activity(activity_id)
+    events = await db.get_events_for_activity(activity_id)
     if events:
         events_text_parts = ["\n\n<b>Связанные события:</b>"]
         for event in events:
             schedule_str = "Не определено"
             if event['event_type'] == 'single' and event['event_date']:
-                event_date = event['event_date']
-                if isinstance(event_date, str): event_date = datetime.fromisoformat(event_date)
-                schedule_str = f"{event_date.strftime('%d.%m.%Y в %H:%M')}"
+                schedule_str = f"{event['event_date'].strftime('%d.%m.%Y в %H:%M')}"
             elif event['event_type'] == 'recurring' and event['weekday'] is not None and event['event_time'] is not None:
-                event_time = event['event_time']
-                if isinstance(event_time, str): event_time = time.fromisoformat(event_time)
-                schedule_str = f"Каждый {weekdays_map[event['weekday']]} в {event_time.strftime('%H:%M')}"
+                schedule_str = f"Каждый {weekdays_map[event['weekday']]} в {event['event_time'].strftime('%H:%M')}"
             
             event_name = event['name'] or activity['name']
-            cost = format_amount(Decimal(str(event['cost'])))
+            cost = format_amount(event['cost'])
             events_text_parts.append(f"- {event_name} ({schedule_str}, {cost} {CURRENCY_SYMBOL})")
         
         text += "\n".join(events_text_parts)
@@ -98,32 +87,28 @@ async def process_subscribe(callback: CallbackQuery):
     activity_id = int(callback.data.split("_")[1])
     user_id = callback.from_user.id
     
-    db.add_subscription(user_id, activity_id)
+    await db.add_subscription(user_id, activity_id)
     logger.info(f"User {user_id} subscribed to activity {activity_id}")
     
     await callback.answer("✅ Вы успешно подписались!", show_alert=True)
     
-    activity = db.get_activity(activity_id)
-    is_subscribed = db.is_user_subscribed(user_id, activity_id)
+    activity = await db.get_activity(activity_id)
+    is_subscribed = await db.is_user_subscribed(user_id, activity_id)
     keyboard = await get_activity_details_keyboard(activity_id, is_subscribed)
     
     text = f"<b>{activity['name']}</b>\n\n{activity['description']}"
-    events = db.get_events_for_activity(activity_id)
+    events = await db.get_events_for_activity(activity_id)
     if events:
         events_text_parts = ["\n\n<b>Связанные события:</b>"]
         for event in events:
             schedule_str = "Не определено"
             if event['event_type'] == 'single' and event['event_date']:
-                event_date = event['event_date']
-                if isinstance(event_date, str): event_date = datetime.fromisoformat(event_date)
-                schedule_str = f"{event_date.strftime('%d.%m.%Y в %H:%M')}"
+                schedule_str = f"{event['event_date'].strftime('%d.%m.%Y в %H:%M')}"
             elif event['event_type'] == 'recurring' and event['weekday'] is not None and event['event_time'] is not None:
-                event_time = event['event_time']
-                if isinstance(event_time, str): event_time = time.fromisoformat(event_time)
-                schedule_str = f"Каждый {weekdays_map[event['weekday']]} в {event_time.strftime('%H:%M')}"
+                schedule_str = f"Каждый {weekdays_map[event['weekday']]} в {event['event_time'].strftime('%H:%M')}"
             
             event_name = event['name'] or activity['name']
-            cost = format_amount(Decimal(str(event['cost'])))
+            cost = format_amount(event['cost'])
             events_text_parts.append(f"- {event_name} ({schedule_str}, {cost} {CURRENCY_SYMBOL})")
         text += "\n".join(events_text_parts)
 
@@ -133,39 +118,34 @@ async def process_subscribe(callback: CallbackQuery):
         parse_mode="HTML"
     )
 
-
 @router.callback_query(F.data.startswith("unsubscribe_"))
 async def process_unsubscribe(callback: CallbackQuery):
     """Обрабатывает отписку от активности."""
     activity_id = int(callback.data.split("_")[1])
     user_id = callback.from_user.id
     
-    db.remove_subscription(user_id, activity_id)
+    await db.remove_subscription(user_id, activity_id)
     logger.info(f"User {user_id} unsubscribed from activity {activity_id}")
     
     await callback.answer("✅ Вы успешно отписались!", show_alert=True)
 
-    activity = db.get_activity(activity_id)
-    is_subscribed = db.is_user_subscribed(user_id, activity_id)
+    activity = await db.get_activity(activity_id)
+    is_subscribed = await db.is_user_subscribed(user_id, activity_id)
     keyboard = await get_activity_details_keyboard(activity_id, is_subscribed)
 
     text = f"<b>{activity['name']}</b>\n\n{activity['description']}"
-    events = db.get_events_for_activity(activity_id)
+    events = await db.get_events_for_activity(activity_id)
     if events:
         events_text_parts = ["\n\n<b>Связанные события:</b>"]
         for event in events:
             schedule_str = "Не определено"
             if event['event_type'] == 'single' and event['event_date']:
-                event_date = event['event_date']
-                if isinstance(event_date, str): event_date = datetime.fromisoformat(event_date)
-                schedule_str = f"{event_date.strftime('%d.%m.%Y в %H:%M')}"
+                schedule_str = f"{event['event_date'].strftime('%d.%m.%Y в %H:%M')}"
             elif event['event_type'] == 'recurring' and event['weekday'] is not None and event['event_time'] is not None:
-                event_time = event['event_time']
-                if isinstance(event_time, str): event_time = time.fromisoformat(event_time)
-                schedule_str = f"Каждый {weekdays_map[event['weekday']]} в {event_time.strftime('%H:%M')}"
+                schedule_str = f"Каждый {weekdays_map[event['weekday']]} в {event['event_time'].strftime('%H:%M')}"
             
             event_name = event['name'] or activity['name']
-            cost = format_amount(Decimal(str(event['cost'])))
+            cost = format_amount(event['cost'])
             events_text_parts.append(f"- {event_name} ({schedule_str}, {cost} {CURRENCY_SYMBOL})")
         text += "\n".join(events_text_parts)
 
@@ -180,22 +160,15 @@ async def back_to_activities_list(callback: CallbackQuery):
     """Возвращает к списку активностей."""
     user_id = callback.from_user.id
     
-    all_activities = db.get_all_activities()
-    general_activity_events = db.get_events_for_activity(1)
-    activities_to_show = []
-    for act in all_activities:
-        if act['id'] == 1:
-            if general_activity_events:
-                activities_to_show.append(act)
-        else:
-            activities_to_show.append(act)
+    # ИСПРАВЛЕНО: Аналогичное исправление, как в cmd_activity
+    activities_to_show = await db.get_all_activities()
 
     if not activities_to_show:
         await callback.message.edit_text("На данный момент нет ни одной доступной активности.")
         await callback.answer()
         return
 
-    user_subscriptions = db.get_user_subscriptions(user_id)
+    user_subscriptions = await db.get_user_subscriptions(user_id)
     
     keyboard = await get_activities_keyboard(activities_to_show, user_subscriptions)
     explanation_text = (
@@ -245,7 +218,7 @@ async def process_activity_end_date(message: Message, state: FSMContext):
     
     data = await state.get_data()
     try:
-        activity_id = db.create_activity(data['name'], data['description'], end_date)
+        activity_id = await db.create_activity(data['name'], data['description'], end_date)
         await state.clear()
         
         logger.info(f"Admin {message.from_user.id} created new activity {activity_id}: {data['name']}")
@@ -254,11 +227,10 @@ async def process_activity_end_date(message: Message, state: FSMContext):
             [InlineKeyboardButton(text="Создать событие для этой активности", callback_data=f"create_event_for_{activity_id}")]
         ])
         await message.answer(f"✅ Новая активность '{data['name']}' успешно создана!", reply_markup=keyboard)
-    except sqlite3.IntegrityError:
+    except Exception: # Catches potential UNIQUE constraint violation from DB
         await message.reply(f"❌ Активность с названием '{data['name']}' уже существует. Пожалуйста, выберите другое название или отмените операцию (/cancel).")
         await state.set_state(ActivityCreationStates.waiting_for_name)
         await message.answer("Введите название новой активности:")
-
 
 @router.message(Command("edit_act", ignore_case=True))
 async def cmd_edit_activity(message: Message):
@@ -267,7 +239,7 @@ async def cmd_edit_activity(message: Message):
         await message.reply("❌ У вас нет прав для выполнения этой команды.")
         return
     
-    activities = db.get_all_activities()
+    activities = await db.get_all_activities()
     if not activities:
         await message.answer("Нет активностей для редактирования.")
         return
@@ -279,7 +251,7 @@ async def cmd_edit_activity(message: Message):
 async def process_edit_activity_selection(callback: CallbackQuery, state: FSMContext):
     """Запрашивает, что именно нужно отредактировать в активности."""
     activity_id = int(callback.data.split("_")[2])
-    activity = db.get_activity(activity_id)
+    activity = await db.get_activity(activity_id)
     if not activity:
         await callback.answer("Активность не найдена.", show_alert=True)
         return
@@ -307,7 +279,7 @@ async def process_edit_activity_selection(callback: CallbackQuery, state: FSMCon
 async def back_to_edit_list(callback: CallbackQuery, state: FSMContext):
     """Возвращает к списку активностей для редактирования."""
     await state.clear()
-    activities = db.get_all_activities()
+    activities = await db.get_all_activities()
     keyboard = await get_activities_keyboard(activities, action="edit")
     await callback.message.edit_text("Выберите активность для редактирования:", reply_markup=keyboard)
     await callback.answer()
@@ -324,7 +296,7 @@ async def process_edit_field(callback: CallbackQuery, state: FSMContext):
         await state.clear()
         return
 
-    activity = db.get_activity(activity_id)
+    activity = await db.get_activity(activity_id)
     if not activity:
         await callback.answer("Ошибка: Активность не найдена.", show_alert=True)
         await state.clear()
@@ -344,14 +316,14 @@ async def process_edit_field(callback: CallbackQuery, state: FSMContext):
 @router.message(ActivityEditStates.waiting_for_new_name)
 async def update_activity_name(message: Message, state: FSMContext):
     data = await state.get_data()
-    db.update_activity(data['activity_id'], name=message.text)
+    await db.update_activity(data['activity_id'], name=message.text)
     await message.answer("✅ Название активности обновлено.")
     await state.clear()
 
 @router.message(ActivityEditStates.waiting_for_new_description)
 async def update_activity_description(message: Message, state: FSMContext):
     data = await state.get_data()
-    db.update_activity(data['activity_id'], description=message.text)
+    await db.update_activity(data['activity_id'], description=message.text)
     await message.answer("✅ Описание активности обновлено.")
     await state.clear()
 
@@ -368,7 +340,7 @@ async def update_activity_end_date(message: Message, state: FSMContext):
             return
             
     if 'activity_id' in data:
-        db.update_activity(data['activity_id'], end_date=end_date)
+        await db.update_activity(data['activity_id'], end_date=end_date)
         await message.answer("✅ Дата окончания активности обновлена.")
     else:
         await message.answer("❌ Произошла ошибка. Не удалось найти ID активности для обновления.")
@@ -381,7 +353,8 @@ async def cmd_delete_activity(message: Message):
     if not await is_admin(message.from_user.id):
         await message.reply("❌ У вас нет прав для выполнения этой команды.")
         return
-    activities = [act for act in db.get_all_activities() if act['id'] != 1]
+    all_activities = await db.get_all_activities()
+    activities = [act for act in all_activities if act['id'] != 1]
     if not activities:
         await message.answer("Нет активностей для удаления.")
         return
@@ -397,7 +370,7 @@ async def process_delete_confirmation(callback: CallbackQuery):
         await callback.answer("Эту активность нельзя удалить.", show_alert=True)
         return
 
-    activity = db.get_activity(activity_id)
+    activity = await db.get_activity(activity_id)
     if not activity:
         await callback.answer("Активность не найдена.", show_alert=True)
         return
@@ -414,12 +387,12 @@ async def process_delete_confirmation(callback: CallbackQuery):
 async def process_delete_activity(callback: CallbackQuery):
     """Окончательно удаляет активность."""
     activity_id = int(callback.data.split("_")[3])
-    activity = db.get_activity(activity_id)
+    activity = await db.get_activity(activity_id)
     if not activity:
         await callback.answer("Активность уже удалена.", show_alert=True)
         return
         
-    db.delete_activity(activity_id)
+    await db.delete_activity(activity_id)
     logger.warning(f"Admin {callback.from_user.id} deleted activity {activity_id}: {activity['name']}")
     await callback.message.edit_text(f"✅ Активность '{activity['name']}' была удалена.")
     await callback.answer()

@@ -1,35 +1,45 @@
 # XBalanseBot/main.py
-# 2025-07-24 22:45:00
+# v1.5.7 - 2025-08-16
 import asyncio
 import logging
 import os
+import sys
+import subprocess
+from datetime import datetime
+from dotenv import load_dotenv
+
+# ИЗМЕНЕНИЕ: Загрузка .env в самом начале скрипта
+load_dotenv()
+
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import Message, CallbackQuery, ChatMemberUpdated
 
-# УДАЛЕНО: Неверный импорт, который вызывал ошибку ModuleNotFoundError
-# from aiogram.client.session.httpx import HttpxSession
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from dotenv import load_dotenv
 
-load_dotenv()
+# Set asyncio policy for Windows compatibility with psycopg3
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from config import BOT_TOKEN, SUPER_ADMIN_ID
 from app.database import db
 from app.handlers import common, user_commands, admin_commands, activity_handlers, event_handlers
 from app.services import scheduler_jobs
 
-log_dir = "data"
+# Настройка логирования
+log_dir = "data/logs"
 if not os.path.exists(log_dir):
     os.makedirs(log_dir)
+
+log_filename = os.path.join(log_dir, f"bot_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(log_dir, 'bot.log'), encoding='utf-8'),
+        logging.FileHandler(log_filename, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -46,19 +56,19 @@ async def logging_middleware(handler, event, data: dict):
 async def setup_super_admin():
     logger.info("Checking for super admin setup...")
     if not SUPER_ADMIN_ID: return
-    user = db.get_user(telegram_id=SUPER_ADMIN_ID)
+    user = await db.get_user(telegram_id=SUPER_ADMIN_ID)
     if not user:
-        db.create_user(telegram_id=SUPER_ADMIN_ID, username=None, is_admin=True)
+        await db.create_user(telegram_id=SUPER_ADMIN_ID, username=None, is_admin=True)
         logger.info(f"Super admin with ID {SUPER_ADMIN_ID} created.")
     elif not user['is_admin']:
-        db.set_admin_status(telegram_id=SUPER_ADMIN_ID, is_admin=True)
+        await db.set_admin_status(telegram_id=SUPER_ADMIN_ID, is_admin=True)
         logger.info(f"Existing user {SUPER_ADMIN_ID} has been promoted to super admin.")
 
 async def setup_scheduler(bot: Bot, scheduler: AsyncIOScheduler):
     scheduler.add_job(scheduler_jobs.process_demurrage, CronTrigger(hour=0, minute=1), args=(bot,))
-    all_events = db.get_all_events()
-    for event_row in all_events:
-        await scheduler_jobs.schedule_event_jobs(dict(event_row), bot, scheduler)
+    all_events = await db.get_all_events()
+    for event in all_events:
+        await scheduler_jobs.schedule_event_jobs(event, bot, scheduler)
     scheduler.start()
     logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs.")
 
@@ -71,8 +81,6 @@ async def main():
 
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
     
-    # ИЗМЕНЕНО: Убран параметр session. Aiogram автоматически подхватит httpx,
-    # так как он установлен, а aiohttp - нет (или несовместим).
     bot = Bot(
         token=BOT_TOKEN,
         default=DefaultBotProperties(parse_mode="HTML")
@@ -90,17 +98,31 @@ async def main():
     dp.include_router(activity_handlers.router)
     dp.include_router(event_handlers.router)
 
-    logger.warning("Bot is running in DEVELOPMENT mode (polling).")
-    await setup_super_admin()
-    await setup_scheduler(bot, scheduler)
-    await bot.delete_webhook(drop_pending_updates=True)
-    
     try:
+        await db.initialize()
+        await setup_super_admin()
+        await setup_scheduler(bot, scheduler)
+        await bot.delete_webhook(drop_pending_updates=True)
+        
+        logger.info("Bot is running in DEVELOPMENT mode (polling).")
         await dp.start_polling(bot)
+        
     finally:
+        if scheduler.running:
+            scheduler.shutdown()
+            logger.info("Scheduler stopped.")
+            
+        await db.close()
         await bot.session.close()
-        scheduler.shutdown()
-        logger.info("Bot and scheduler stopped.")
+        logger.info("Bot session and database pool closed.")
+        
+        logger.info("Stopping docker-compose services...")
+        try:
+            subprocess.run(["docker-compose", "down"], check=True, capture_output=True)
+            logger.info("Docker services stopped successfully.")
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            logger.error(f"Failed to run 'docker-compose down': {e}")
+
 
 if __name__ == '__main__':
     try:

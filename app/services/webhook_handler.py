@@ -1,4 +1,5 @@
-# 2025-07-24 20:40:00
+# XBalanseBot/app/services/webhook_handler.py
+# v1.5.3 - 2025-08-16
 import logging
 import asyncio
 from decimal import Decimal
@@ -39,23 +40,27 @@ async def handle_tribute_webhook(request: web.Request):
 
         await ensure_user_exists(telegram_id, username)
         
-        exchange_rate = Decimal(db.get_setting('exchange_rate', '1.0'))
+        exchange_rate_str = await db.get_setting('exchange_rate', '1.0')
+        exchange_rate = Decimal(exchange_rate_str)
         top_up_amount = (amount_rub * exchange_rate).quantize(Decimal('0.0001'))
+        user_id = None
 
-        with db.get_connection() as conn:
-            user = conn.execute("SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-            if not user:
-                logger.error(f"User {telegram_id} not found in DB after ensure_user_exists call.")
-                return web.Response(status=500)
+        async with db.pool.connection() as conn:
+            async with conn.transaction():
+                user_row = await conn.execute("SELECT id FROM users WHERE telegram_id = %s", (telegram_id,)).fetchone()
+                if not user_row:
+                    logger.error(f"User {telegram_id} not found in DB after ensure_user_exists call.")
+                    raise Exception("User not found during webhook processing")
 
-            user_id = user['id']
-            conn.execute("UPDATE users SET balance = balance + ? WHERE id = ?", (str(top_up_amount), user_id))
-            conn.execute(
-                "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (0, ?, ?, 'top_up', ?)",
-                (user_id, str(top_up_amount), f"Пополнение через Tribute на {amount_rub} RUB")
-            )
-            conn.commit()
-            db.handle_debt_repayment(user_id)
+                user_id = user_row[0]
+                await conn.execute("UPDATE users SET balance = balance + %s WHERE id = %s", (top_up_amount, user_id))
+                await conn.execute(
+                    "INSERT INTO transactions (from_user_id, to_user_id, amount, type, comment) VALUES (0, %s, %s, 'top_up', %s)",
+                    (user_id, top_up_amount, f"Пополнение через Tribute на {amount_rub} RUB")
+                )
+        
+        if user_id:
+            await db.handle_debt_repayment(user_id)
 
         try:
             await bot.send_message(
@@ -93,4 +98,5 @@ async def run_webhook_server(bot: Bot, dp: Dispatcher):
     logger.info(f"Starting aiohttp server on {WEBHOOK_HOST}:{WEBHOOK_PORT}...")
     await site.start()
     
+    # This will run forever until interrupted
     await asyncio.Event().wait()

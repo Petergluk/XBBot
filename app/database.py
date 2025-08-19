@@ -1,6 +1,7 @@
 # XBalanseBot/app/database.py
-# v1.5.7 - 2025-08-17 (fix sequences init for tests)
+# v1.8.0 - 2025-08-20 (Render.com deployment ready)
 import logging
+import os
 from datetime import datetime, date, time
 from typing import Any, Dict, List, Optional
 
@@ -15,11 +16,19 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# PostgreSQL connection string
-CONNINFO = (
-    f"host={POSTGRES_HOST} port={POSTGRES_PORT} dbname={POSTGRES_DB} "
-    f"user={POSTGRES_USER} password={POSTGRES_PASSWORD}"
-)
+# --- НОВЫЙ УНИВЕРСАЛЬНЫЙ БЛОК ДЛЯ ПОДКЛЮЧЕНИЯ К БД ---
+# Проверяем, есть ли переменная DATABASE_URL (стандарт для Render.com)
+if database_url := os.environ.get("DATABASE_URL"):
+    CONNINFO = database_url
+    logger.info("Using DATABASE_URL for database connection.")
+else:
+    # Если нет, собираем строку подключения из отдельных переменных (для локальной разработки)
+    logger.info("Using individual POSTGRES variables for database connection.")
+    CONNINFO = (
+        f"host={POSTGRES_HOST} port={POSTGRES_PORT} dbname={POSTGRES_DB} "
+        f"user={POSTGRES_USER} password={POSTGRES_PASSWORD}"
+    )
+
 
 class Database:
     """Класс для асинхронного управления базой данных PostgreSQL."""

@@ -1,5 +1,5 @@
 # XBalanseBot/main.py
-# v1.5.7 - 2025-08-16
+# v1.8.0 - 2025-08-20 (Render.com deployment ready)
 import asyncio
 import logging
 import os
@@ -8,7 +8,7 @@ import subprocess
 from datetime import datetime
 from dotenv import load_dotenv
 
-# ИЗМЕНЕНИЕ: Загрузка .env в самом начале скрипта
+# Загрузка .env в самом начале скрипта для локальной разработки
 load_dotenv()
 
 from aiogram import Bot, Dispatcher
@@ -23,10 +23,12 @@ from apscheduler.triggers.cron import CronTrigger
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from config import BOT_TOKEN, SUPER_ADMIN_ID
+from config import BOT_TOKEN, SUPER_ADMIN_ID, DEV_MODE, WEBHOOK_HOST
 from app.database import db
 from app.handlers import common, user_commands, admin_commands, activity_handlers, event_handlers
 from app.services import scheduler_jobs
+# ИЗМЕНЕНИЕ: Импортируем функцию для запуска веб-сервера
+from app.services.webhook_handler import run_webhook_server
 
 # Настройка логирования
 log_dir = "data/logs"
@@ -72,6 +74,7 @@ async def setup_scheduler(bot: Bot, scheduler: AsyncIOScheduler):
     scheduler.start()
     logger.info(f"Scheduler started with {len(scheduler.get_jobs())} jobs.")
 
+# --- НОВАЯ ВЕРСИЯ ФУНКЦИИ MAIN, ГОТОВАЯ К ДЕПЛОЮ ---
 async def main():
     logger.info("Starting bot initialization...")
     
@@ -102,11 +105,28 @@ async def main():
         await db.initialize()
         await setup_super_admin()
         await setup_scheduler(bot, scheduler)
+        
+        # Удаляем старый вебхук, чтобы избежать конфликтов
         await bot.delete_webhook(drop_pending_updates=True)
         
-        logger.info("Bot is running in DEVELOPMENT mode (polling).")
-        await dp.start_polling(bot)
-        
+        if DEV_MODE:
+            # --- РЕЖИМ ДЛЯ ЛОКАЛЬНОЙ РАЗРАБОТКИ ---
+            logger.info("Bot is running in DEVELOPMENT mode (polling).")
+            await dp.start_polling(bot)
+        else:
+            # --- РЕЖИМ ДЛЯ СЕРВЕРА (RENDER.COM) ---
+            if not WEBHOOK_HOST:
+                logger.critical("FATAL: WEBHOOK_HOST is not set for production mode!")
+                return
+                
+            logger.info("Bot is running in PRODUCTION mode (webhook).")
+            webhook_url = f"https://{WEBHOOK_HOST}/webhook/telegram"
+            await bot.set_webhook(webhook_url)
+            logger.info(f"Webhook set to: {webhook_url}")
+            
+            # Запускаем веб-сервер, который будет принимать обновления от Telegram и Tribute
+            await run_webhook_server(bot, dp)
+            
     finally:
         if scheduler.running:
             scheduler.shutdown()
@@ -116,12 +136,14 @@ async def main():
         await bot.session.close()
         logger.info("Bot session and database pool closed.")
         
-        logger.info("Stopping docker-compose services...")
-        try:
-            subprocess.run(["docker-compose", "down"], check=True, capture_output=True)
-            logger.info("Docker services stopped successfully.")
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            logger.error(f"Failed to run 'docker-compose down': {e}")
+        # ИЗМЕНЕНИЕ: Остановка Docker-контейнера происходит только в режиме разработки
+        if DEV_MODE:
+            logger.info("Stopping docker-compose services...")
+            try:
+                subprocess.run(["docker-compose", "down"], check=True, capture_output=True)
+                logger.info("Docker services stopped successfully.")
+            except (subprocess.CalledProcessError, FileNotFoundError) as e:
+                logger.error(f"Failed to run 'docker-compose down': {e}")
 
 
 if __name__ == '__main__':
